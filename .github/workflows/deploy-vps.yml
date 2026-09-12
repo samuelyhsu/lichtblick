@@ -24,9 +24,6 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  DEPLOY_HOST: 104.194.67.196
-  DEPLOY_PORT: 49361
-  DEPLOY_USER: deploy
 
 permissions:
   contents: read
@@ -74,6 +71,9 @@ jobs:
 
       - name: Deploy via rsync
         env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
