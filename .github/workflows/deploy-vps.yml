@@ -1,0 +1,92 @@
+# 手动构建任意版本（tag / 分支 / commit SHA）的 web 静态产物，并 rsync 到自有 VPS
+# 服务器侧 deploy 用户的公钥被限制为 `rrsync -wo /var/www/visual.uplume.com`，
+# 因此这把钥匙只能向站点目录写入文件，无 shell、无读权限
+name: Deploy Web to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的 tag / 分支 / commit SHA"
+        required: true
+        default: develop
+      repository:
+        description: "源仓库"
+        type: choice
+        default: samuelyhsu/lichtblick
+        options:
+          - samuelyhsu/lichtblick
+          - lichtblick-suite/lichtblick
+      node-version:
+        description: "Node 版本（较老的 tag 可能需要 20）"
+        required: true
+        default: "24"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  DEPLOY_HOST: 104.194.67.196
+  DEPLOY_PORT: 49361
+  DEPLOY_USER: deploy
+
+permissions:
+  contents: read
+
+# 同一时间只允许一个部署，避免两次 rsync 交错
+concurrency:
+  group: deploy-visual-uplume
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://visual.uplume.com
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build web static files
+        run: yarn web:build:prod
+
+      # 写入版本信息，访问 /version.json 即可确认线上是哪个版本
+      - name: Write version.json
+        env:
+          REPO: ${{ inputs.repository }}
+          REF: ${{ inputs.ref }}
+        run: |
+          jq -n --arg repo "$REPO" --arg ref "$REF" \
+            --arg sha "$(git rev-parse HEAD)" --arg built "$(date -u +%FT%TZ)" \
+            '{repo: $repo, ref: $ref, sha: $sha, built: $built}' > web/.webpack/version.json
+          cat web/.webpack/version.json
+
+      - name: Deploy via rsync
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # --delay-updates：全部传完后再统一替换，缩短新旧文件混杂的窗口
+          # --delete-delay：替换完成后再清理旧文件
+          rsync -rlptz --delay-updates --delete-delay --stats \
+            -e "ssh -p $DEPLOY_PORT -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes" \
+            web/.webpack/ "$DEPLOY_USER@$DEPLOY_HOST:/"
+
+      - name: Verify deployment
+        run: |
+          curl -fsS --retry 3 https://visual.uplume.com/version.json
