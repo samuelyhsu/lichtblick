@@ -669,6 +669,49 @@ describe("IterablePlayer", () => {
     await player.isClosed;
   });
 
+  it("honors startPlayback() called before the initial start-play finishes", async () => {
+    // Regression test: calling startPlayback() as soon as presence turns PRESENT (which can
+    // happen while the player is still in "initialize"/"start-play", before it ever reaches
+    // "idle" for the first time) must not be silently dropped once start-play completes.
+
+    const source = new TestSource();
+    const player = new IterablePlayer({
+      source,
+      enablePreload: false,
+      sourceId: "test",
+    });
+
+    let didStartEarly = false;
+    const reachedEnd = signal();
+    player.setListener(async (state) => {
+      if (!didStartEarly && state.presence === PlayerPresence.PRESENT && state.activeData) {
+        didStartEarly = true;
+        // Fires while the player is still mid-"initialize", well before "start-play" completes.
+        player.startPlayback();
+        return;
+      }
+
+      if (state.activeData && _.isEqual(state.activeData.currentTime, state.activeData.endTime)) {
+        reachedEnd.resolve();
+      }
+    });
+
+    const timedOut = Symbol("timedOut");
+    const result = await Promise.race([
+      reachedEnd.then(() => "reachedEnd"),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(timedOut);
+        }, 1000);
+      }),
+    ]);
+
+    expect(result).toBe("reachedEnd");
+
+    player.close();
+    await player.isClosed;
+  });
+
   it("pausePlayback emits when seek-backfill state is active", async () => {
     const source = new TestSource();
     const topic = BasicBuilder.string();
@@ -1330,6 +1373,35 @@ describe("IterablePlayer", () => {
       expect(mockMessageIterator).toHaveBeenCalledWith({
         topics: new Map([["test_topic", { topic: "test_topic" }]]),
         consumptionType: "full",
+      });
+    });
+
+    it("should forward start and end bounds to messageIterator", async () => {
+      const source = new TestSource();
+      const mockMessageIterator = jest.fn().mockImplementation(async function* () {});
+      source.messageIterator = mockMessageIterator;
+
+      const player = new IterablePlayer({
+        source,
+        enablePreload: false,
+        sourceId: "test",
+      });
+
+      const store = new PlayerStateStore(4);
+      player.setListener(async (state) => {
+        await store.add(state);
+      });
+      await store.done;
+
+      const start = { sec: 1, nsec: 0 };
+      const end = { sec: 2, nsec: 0 };
+      player.getBatchIterator("test_topic", { start, end });
+
+      expect(mockMessageIterator).toHaveBeenCalledWith({
+        topics: new Map([["test_topic", { topic: "test_topic" }]]),
+        consumptionType: "full",
+        start,
+        end,
       });
     });
 
